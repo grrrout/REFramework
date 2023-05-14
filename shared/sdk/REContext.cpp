@@ -59,6 +59,59 @@ namespace sdk {
 
     static std::shared_mutex s_mutex{};
 
+    //stackoverflow paste idr how necessary this was in the end
+    BOOL IsBadMemPtr(BOOL write, void* ptr, size_t size) {
+        MEMORY_BASIC_INFORMATION mbi;
+        BOOL ok;
+        DWORD mask;
+        BYTE* p = (BYTE*)ptr;
+        BYTE* maxp = p + size;
+        BYTE* regend = NULL;
+
+        if (size == 0) {
+            return FALSE;
+        }
+
+        if (p == NULL) {
+            return TRUE;
+        }
+
+        if (write == FALSE) {
+            mask = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        } else {
+            mask = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        }
+
+        do {
+            if (p == ptr || p == regend) {
+                if (VirtualQuery((LPCVOID)p, &mbi, sizeof(mbi)) == 0) {
+                    return TRUE;
+                } else {
+                    regend = ((BYTE*)mbi.BaseAddress + mbi.RegionSize);
+                }
+            }
+
+            ok = (mbi.Protect & mask) != 0;
+
+            if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) {
+                ok = FALSE;
+            }
+
+            if (!ok) {
+                return TRUE;
+            }
+
+            if (maxp <= regend) 
+            {
+                return FALSE;
+            } else if (maxp > regend) 
+            {
+                p = regend;
+            }
+        } while (p < maxp);
+
+        return FALSE;
+    }
     void VM::update_pointers() {
         {
             // Lock a shared lock for the s_mutex
@@ -136,7 +189,9 @@ namespace sdk {
         for (auto i = 0; i < 0x20000; i += sizeof(void*)) {
             auto ptr = *(sdk::RETypeDB**)((uintptr_t)*s_global_context + i);
 
-            if (ptr == nullptr || IsBadReadPtr(ptr, sizeof(void*)) || ((uintptr_t)ptr & (sizeof(void*) - 1)) != 0) {
+            if (ptr == nullptr || IsBadMemPtr(false, (void*)ptr, sizeof(void*)) ||
+           //    IsBadReadPtr(ptr, sizeof(void*)) || 
+                ((uintptr_t)ptr & (sizeof(void*) - 1)) != 0) {
                 continue;
             }
 
@@ -298,28 +353,11 @@ namespace sdk {
         auto context = sdk::get_thread_context();
         sdk::VMContext::ScopedTranslator scoped_translator{context};
 
-        bool corrupted_before_call = context->unkPtr != nullptr && context->unkPtr->unkPtr != nullptr;
-
         try {
             func();
 
             if (context->unkPtr->unkPtr != nullptr) {
                 spdlog::error("Internal game exception thrown in function call for {}", function_name.data());
-
-                const auto exception_managed_object = (::REManagedObject*)context->unkPtr->unkPtr;
-
-                if (utility::re_managed_object::is_managed_object(exception_managed_object)) {
-                    const auto exception_tdb_type = utility::re_managed_object::get_type_definition(exception_managed_object);
-
-                    if (exception_tdb_type != nullptr) {
-                        const auto exception_name = exception_tdb_type->get_full_name();
-                        spdlog::error(" Exception name: {}", exception_name.data());
-                    }
-                }
-
-                if (corrupted_before_call) {
-                    spdlog::error("VMContext was already corrupted before this call, a previous exception may not have been handled properly");
-                }
 
                 context->unkPtr->unkPtr = nullptr;
                 throw std::runtime_error("Internal game exception thrown in function call for " + std::string(function_name.data()));
@@ -517,5 +555,3 @@ namespace sdk {
         return VM::get_invoke_table();
     }
 }
-
-
